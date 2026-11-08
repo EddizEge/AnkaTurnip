@@ -1,0 +1,16 @@
+diff --git a/src/util/u_gralloc/u_gralloc_fallback.c b/src/util/u_gralloc/u_gralloc_fallback.c
+index 44fb32d..341b115 100644
+--- a/src/util/u_gralloc/u_gralloc_fallback.c
++++ b/src/util/u_gralloc/u_gralloc_fallback.c
+@@ -153,6 +153,11 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
+       /* This UBWC flag was introduced in a5xx. */
+       bool ubwc = hnd->handle->data[hnd->handle->numFds + 1] & 0x08000000;
+       out->modifier = ubwc ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_LINEAR;
++   } else {
++      /* Snapalloc (Android 15+ Qualcomm gralloc) handles carry no 'gmsm' magic. The buffer was allocated for the usage the
++       * driver asked (GPU render target/texture, no private UBWC bit), which gralloc lays out linear: an INVALID modifier
++       * would let the driver pick its own tiling and the compositor would read the tiles as rows. */
++      out->modifier = DRM_FORMAT_MOD_LINEAR;
+    }
+ #endif
+ 

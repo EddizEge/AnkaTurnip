@@ -1,0 +1,28 @@
+diff --git a/src/compiler/nir/nir_functions.c b/src/compiler/nir/nir_functions.c
+index d5572bd..d9c5e6b 100644
+--- a/src/compiler/nir/nir_functions.c
++++ b/src/compiler/nir/nir_functions.c
+@@ -184,6 +184,23 @@ nir_inline_function_impl(struct nir_builder *b,
+ 
+    bool nest_if = function_ends_in_jump(copy);
+ 
++   if (!nest_if && exec_list_is_singular(&copy->body)) {
++      /* The body is a single block: move its instructions to the cursor.
++       * Going through nir_cf_reinsert() would split the block at the cursor
++       * and stitch it back together, moving every instruction of the block
++       * on both sides of the cursor, which makes inlining many calls into one
++       * block quadratic.
++       */
++      nir_cursor cursor = b->cursor;
++      nir_foreach_instr_safe(instr, nir_start_block(copy)) {
++         nir_instr_remove(instr);
++         nir_instr_insert(cursor, instr);
++         cursor = nir_after_instr(instr);
++      }
++      b->cursor = cursor;
++      return ret_val;
++   }
++
+    /* Pluck the body out of the function and place it here */
+    nir_cf_list body;
+    nir_cf_list_extract(&body, &copy->body);

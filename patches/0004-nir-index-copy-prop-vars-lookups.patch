@@ -1,0 +1,495 @@
+diff --git a/src/compiler/nir/nir_opt_copy_prop_vars.c b/src/compiler/nir/nir_opt_copy_prop_vars.c
+index cc3ffde..f0bac0c 100644
+--- a/src/compiler/nir/nir_opt_copy_prop_vars.c
++++ b/src/compiler/nir/nir_opt_copy_prop_vars.c
+@@ -26,7 +26,10 @@
+ #include "nir_deref.h"
+ 
+ #include "util/bitscan.h"
++#include "util/hash_table.h"
+ #include "util/u_dynarray.h"
++#define XXH_INLINE_ALL
++#include "util/xxhash.h"
+ 
+ static const bool debug = false;
+ 
+@@ -53,6 +56,45 @@ static const bool debug = false;
+  * Removal of dead writes to variables is handled by another pass.
+  */
+ 
++/* Index over the entries of a copy_array, so that looking up a deref does
++ * not need to compare it with every entry.  Only lookups are indexed: an
++ * entry can only contain (or be equal to) a deref if:
++ *
++ *  - its path is not longer than the deref's path, and
++ *  - when both paths have the same length and end with an array deref, they
++ *    have the same root (variable or cast) and the same index (the same SSA
++ *    value or the same constant).
++ *
++ * (see compare_deref_paths()).  Entries whose path ends with an array deref
++ * are chained by a hash of (root, path length, index); the others are kept
++ * in a list and are always compared.  A deref ending with an array deref is
++ * then only compared with the unkeyed entries and its own chain, provided no
++ * keyed entry has a shorter path.
++ *
++ * The index is built on the first lookup in a large array, kept up to date
++ * when entries are appended and dropped when entries are removed (removal
++ * moves entries around).
++ */
++struct copy_index {
++   bool valid;
++
++   /* Hash key -> 1-based position of the last entry with that key */
++   struct hash_table_u64 *chains;
++
++   /* Positions (uint32_t) of the entries without a key, in array order */
++   struct util_dynarray unkeyed;
++
++   /* Shortest path among the keyed entries */
++   unsigned min_keyed_length;
++};
++
++struct copy_array {
++   struct util_dynarray entries;
++
++   /* NULL until a lookup builds it */
++   struct copy_index *index;
++};
++
+ struct copies {
+    struct list_head node;
+ 
+@@ -60,12 +102,12 @@ struct copies {
+    struct hash_table ht;
+ 
+    /* Array of derefs that can't be chased back to a variable */
+-   struct util_dynarray arr;
++   struct copy_array arr;
+ };
+ 
+ struct copies_dynarray {
+    struct list_head node;
+-   struct util_dynarray arr;
++   struct copy_array arr;
+ 
+    /* The copies structure this dynarray was cloned or created for */
+    struct copies *owner;
+@@ -104,6 +146,11 @@ struct copy_entry {
+    struct value src;
+ 
+    nir_deref_and_path dst;
++
++   /* 1-based position of the previous entry with the same copy_index key,
++    * 0 for none.  Only meaningful while the array's index is valid.
++    */
++   uint32_t index_prev;
+ };
+ 
+ struct copy_prop_var_state {
+@@ -325,7 +372,8 @@ get_copies_dynarray(struct copy_prop_var_state *state)
+ {
+    struct copies_dynarray *cp_arr =
+       ralloc(state->mem_ctx, struct copies_dynarray);
+-   util_dynarray_init(&cp_arr->arr, state->mem_ctx);
++   util_dynarray_init(&cp_arr->arr.entries, state->mem_ctx);
++   cp_arr->arr.index = NULL;
+    return cp_arr;
+ }
+ 
+@@ -345,7 +393,7 @@ static void
+ clone_copies_dynarray_from_src(struct copies_dynarray *dst,
+                                struct copies_dynarray *src)
+ {
+-   util_dynarray_append_dynarray(&dst->arr, &src->arr);
++   util_dynarray_append_dynarray(&dst->arr.entries, &src->arr.entries);
+ }
+ 
+ /* Gets copies array from the hash table entry or clones the source array if
+@@ -388,13 +436,13 @@ copies_array_for_var(struct copy_prop_var_state *state,
+    return copies_array;
+ }
+ 
+-static struct util_dynarray *
++static struct copy_array *
+ copies_array_for_deref(struct copy_prop_var_state *state,
+                        struct copies *copies, nir_deref_and_path *deref)
+ {
+    nir_get_deref_path(state->mem_ctx, deref);
+ 
+-   struct util_dynarray *copies_array;
++   struct copy_array *copies_array;
+    if (deref->_path->path[0]->deref_type != nir_deref_type_var) {
+       copies_array = &copies->arr;
+    } else {
+@@ -406,18 +454,122 @@ copies_array_for_deref(struct copy_prop_var_state *state,
+    return copies_array;
+ }
+ 
++/* Arrays with fewer entries are searched without an index */
++#define COPY_INDEX_MIN_ENTRIES 16
++
++/* Computes the copy_index key of a deref path, see struct copy_index.
++ * Returns false if the path has no key.
++ */
++static bool
++copy_index_key(nir_deref_path *path, uint64_t *key, unsigned *length)
++{
++   unsigned n = 0;
++   while (path->path[n] != NULL)
++      n++;
++
++   nir_deref_instr *root = path->path[0];
++   nir_deref_instr *leaf = path->path[n - 1];
++   if (n < 2 || leaf->deref_type != nir_deref_type_array)
++      return false;
++
++   const bool is_const = nir_src_is_const(leaf->arr.index);
++   const struct {
++      const void *root;
++      uint64_t index;
++      uint32_t length;
++      uint32_t is_const;
++   } k = {
++      .root = root->deref_type == nir_deref_type_var ? (const void *)root->var
++                                                     : (const void *)root,
++      .index = is_const ? nir_src_as_uint(leaf->arr.index)
++                        : (uint64_t)(uintptr_t)leaf->arr.index.ssa,
++      .length = n,
++      .is_const = is_const,
++   };
++
++   /* Different keys may hash the same: that only merges their chains, the
++    * entries in a chain are still compared with the deref.
++    */
++   *key = XXH64(&k, sizeof(k), 0);
++   *length = n;
++   return true;
++}
++
++static void
++copy_index_add(struct copy_prop_var_state *state, struct copy_array *array,
++               unsigned pos)
++{
++   struct copy_index *index = array->index;
++   struct copy_entry *entry =
++      util_dynarray_element(&array->entries, struct copy_entry, pos);
++
++   uint64_t key;
++   unsigned length;
++   if (copy_index_key(nir_get_deref_path(state->mem_ctx, &entry->dst),
++                      &key, &length)) {
++      entry->index_prev =
++         (uintptr_t)_mesa_hash_table_u64_search(index->chains, key);
++      _mesa_hash_table_u64_insert(index->chains, key,
++                                  (void *)(uintptr_t)(pos + 1));
++      index->min_keyed_length = MIN2(index->min_keyed_length, length);
++   } else {
++      util_dynarray_append_typed(&index->unkeyed, uint32_t, pos);
++   }
++}
++
++static struct copy_index *
++copy_index_get(struct copy_prop_var_state *state, struct copy_array *array)
++{
++   if (array->index == NULL) {
++      array->index = ralloc(state->mem_ctx, struct copy_index);
++      array->index->valid = false;
++      array->index->chains = _mesa_hash_table_u64_create(state->mem_ctx);
++      util_dynarray_init(&array->index->unkeyed, state->mem_ctx);
++   }
++
++   struct copy_index *index = array->index;
++   if (!index->valid) {
++      _mesa_hash_table_u64_clear(index->chains);
++      util_dynarray_clear(&index->unkeyed);
++      index->min_keyed_length = UINT_MAX;
++
++      unsigned count =
++         util_dynarray_num_elements(&array->entries, struct copy_entry);
++      for (unsigned pos = 0; pos < count; pos++)
++         copy_index_add(state, array, pos);
++
++      index->valid = true;
++   }
++
++   return index;
++}
++
++static void
++copy_index_invalidate(struct copy_array *array)
++{
++   if (array->index)
++      array->index->valid = false;
++}
++
+ static struct copy_entry *
+ copy_entry_create(struct copy_prop_var_state *state,
+                   struct copies *copies, nir_deref_and_path *deref)
+ {
+-   struct util_dynarray *copies_array =
++   struct copy_array *copies_array =
+       copies_array_for_deref(state, copies, deref);
+ 
+    struct copy_entry new_entry = {
+       .dst = *deref,
+    };
+-   util_dynarray_append(copies_array, new_entry);
+-   return util_dynarray_top_ptr(copies_array, struct copy_entry);
++   util_dynarray_append(&copies_array->entries, new_entry);
++
++   if (copies_array->index && copies_array->index->valid) {
++      copy_index_add(state, copies_array,
++                     util_dynarray_num_elements(&copies_array->entries,
++                                                struct copy_entry) - 1);
++   }
++
++   return util_dynarray_top_ptr(&copies_array->entries, struct copy_entry);
+ }
+ 
+ /* Remove copy entry by swapping it with the last element and reducing the
+@@ -426,12 +578,14 @@ copy_entry_create(struct copy_prop_var_state *state,
+  * will not affect the rest of the iteration.
+  */
+ static void
+-copy_entry_remove(struct util_dynarray *copies,
++copy_entry_remove(struct copy_array *copies,
+                   struct copy_entry *entry,
+                   struct copy_entry **relocated_entry)
+ {
+    const struct copy_entry *src =
+-      util_dynarray_pop_ptr(copies, struct copy_entry);
++      util_dynarray_pop_ptr(&copies->entries, struct copy_entry);
++
++   copy_index_invalidate(copies);
+ 
+    /* Because we're removing elements from an array, pointers to those
+     * elements are not stable as we modify the array.
+@@ -454,6 +608,62 @@ is_array_deref_of_vector(const nir_deref_and_path *deref)
+    return glsl_type_is_vector(parent->type);
+ }
+ 
++static void
++lookup_check_entry(struct copy_prop_var_state *state,
++                   struct copy_entry *entries, int pos,
++                   nir_deref_and_path *deref,
++                   nir_deref_compare_result allowed_comparisons,
++                   int *first_equal, int *last_match)
++{
++   nir_deref_compare_result result =
++      nir_compare_derefs_and_paths(state->mem_ctx, &entries[pos].dst, deref);
++   if (!(result & allowed_comparisons))
++      return;
++
++   if (result & nir_derefs_equal_bit) {
++      if (*first_equal < 0 || pos < *first_equal)
++         *first_equal = pos;
++   } else if (pos > *last_match) {
++      *last_match = pos;
++   }
++}
++
++/* Same result as the linear search in lookup_entry_for_deref() (the first
++ * equal entry, otherwise the last matching one), comparing the deref only
++ * with the entries that may contain it.
++ */
++static struct copy_entry *
++lookup_entry_in_index(struct copy_prop_var_state *state,
++                      struct copy_array *copies_array,
++                      struct copy_index *index, uint64_t key,
++                      nir_deref_and_path *deref,
++                      nir_deref_compare_result allowed_comparisons,
++                      bool *equal)
++{
++   struct copy_entry *entries = copies_array->entries.data;
++   int first_equal = -1, last_match = -1;
++
++   util_dynarray_foreach(&index->unkeyed, uint32_t, pos) {
++      lookup_check_entry(state, entries, *pos, deref, allowed_comparisons,
++                         &first_equal, &last_match);
++   }
++
++   for (uint32_t pos1 =
++           (uintptr_t)_mesa_hash_table_u64_search(index->chains, key);
++        pos1 != 0; pos1 = entries[pos1 - 1].index_prev) {
++      lookup_check_entry(state, entries, pos1 - 1, deref, allowed_comparisons,
++                         &first_equal, &last_match);
++   }
++
++   if (first_equal >= 0) {
++      if (equal != NULL)
++         *equal = true;
++      return &entries[first_equal];
++   }
++
++   return last_match >= 0 ? &entries[last_match] : NULL;
++}
++
+ static struct copy_entry *
+ lookup_entry_for_deref(struct copy_prop_var_state *state,
+                        struct copies *copies,
+@@ -461,11 +671,27 @@ lookup_entry_for_deref(struct copy_prop_var_state *state,
+                        nir_deref_compare_result allowed_comparisons,
+                        bool *equal)
+ {
+-   struct util_dynarray *copies_array =
++   struct copy_array *copies_array =
+       copies_array_for_deref(state, copies, deref);
+ 
++   uint64_t key;
++   unsigned length;
++   if (util_dynarray_num_elements(&copies_array->entries, struct copy_entry) >=
++          COPY_INDEX_MIN_ENTRIES &&
++       copy_index_key(deref->_path, &key, &length)) {
++      struct copy_index *index = copy_index_get(state, copies_array);
++
++      /* Keyed entries with a shorter path may contain the deref and are not
++       * in its chain.
++       */
++      if (index->min_keyed_length >= length) {
++         return lookup_entry_in_index(state, copies_array, index, key, deref,
++                                      allowed_comparisons, equal);
++      }
++   }
++
+    struct copy_entry *entry = NULL;
+-   util_dynarray_foreach(copies_array, struct copy_entry, iter) {
++   util_dynarray_foreach(&copies_array->entries, struct copy_entry, iter) {
+       nir_deref_compare_result result =
+          nir_compare_derefs_and_paths(state->mem_ctx, &iter->dst, deref);
+       if (result & allowed_comparisons) {
+@@ -484,10 +710,10 @@ lookup_entry_for_deref(struct copy_prop_var_state *state,
+ 
+ static void
+ kill_source_aliases_copy_array(struct copy_prop_var_state *state,
+-                               struct util_dynarray *copies_array,
++                               struct copy_array *copies_array,
+                                nir_deref_and_path *deref)
+ {
+-   util_dynarray_foreach_reverse(copies_array, struct copy_entry, iter) {
++   util_dynarray_foreach_reverse(&copies_array->entries, struct copy_entry, iter) {
+       if (iter->src.is_ssa)
+          continue;
+ 
+@@ -500,14 +726,14 @@ kill_source_aliases_copy_array(struct copy_prop_var_state *state,
+ 
+ static void
+ lookup_entry_and_kill_aliases_copy_array(struct copy_prop_var_state *state,
+-                                         struct util_dynarray *copies_array,
++                                         struct copy_array *copies_array,
+                                          nir_deref_and_path *deref,
+                                          unsigned write_mask,
+                                          bool remove_entry,
+                                          struct copy_entry **entry,
+                                          bool *entry_removed)
+ {
+-   util_dynarray_foreach_reverse(copies_array, struct copy_entry, iter) {
++   util_dynarray_foreach_reverse(&copies_array->entries, struct copy_entry, iter) {
+       nir_deref_compare_result comp =
+          nir_compare_derefs_and_paths(state->mem_ctx, &iter->dst, deref);
+ 
+@@ -567,7 +793,7 @@ lookup_entry_and_kill_aliases(struct copy_prop_var_state *state,
+                                                   remove_entry, &entry,
+                                                   &entry_removed);
+ 
+-         if (copies_array->arr.size == 0) {
++         if (copies_array->arr.entries.size == 0) {
+             _mesa_hash_table_remove(&copies->ht, ht_entry);
+          }
+       }
+@@ -585,13 +811,13 @@ lookup_entry_and_kill_aliases(struct copy_prop_var_state *state,
+        */
+       struct copies_dynarray *cpda =
+          copies_array_for_var(state, copies, write_var);
+-      struct util_dynarray *copies_array = &cpda->arr;
++      struct copy_array *copies_array = &cpda->arr;
+ 
+       lookup_entry_and_kill_aliases_copy_array(state, copies_array, deref,
+                                                write_mask, remove_entry,
+                                                &entry, &entry_removed);
+ 
+-      if (copies_array->size == 0) {
++      if (copies_array->entries.size == 0) {
+          _mesa_hash_table_remove_key(&copies->ht, deref->_path->path[0]->var);
+       }
+ 
+@@ -611,7 +837,7 @@ lookup_entry_and_kill_aliases(struct copy_prop_var_state *state,
+ 
+             kill_source_aliases_copy_array(state, &other_cpda->arr, deref);
+ 
+-            if (other_cpda->arr.size == 0)
++            if (other_cpda->arr.entries.size == 0)
+                _mesa_hash_table_remove(&copies->ht, ht_entry);
+          }
+       }
+@@ -651,10 +877,10 @@ get_entry_and_kill_aliases(struct copy_prop_var_state *state,
+ }
+ 
+ static void
+-apply_barrier_for_modes_to_dynarr(struct util_dynarray *copies_array,
++apply_barrier_for_modes_to_dynarr(struct copy_array *copies_array,
+                                   nir_variable_mode modes)
+ {
+-   util_dynarray_foreach_reverse(copies_array, struct copy_entry, iter) {
++   util_dynarray_foreach_reverse(&copies_array->entries, struct copy_entry, iter) {
+       if (nir_deref_mode_may_be(iter->dst.instr, modes) ||
+           (!iter->src.is_ssa && nir_deref_mode_may_be(iter->src.deref.instr, modes)))
+          copy_entry_remove(copies_array, iter, NULL);
+@@ -976,17 +1202,17 @@ invalidate_copies_for_cf_node(struct copy_prop_var_state *state,
+          struct copies_dynarray *copies_array =
+             get_copies_array_from_ht_entry(state, copies, ht_entry);
+ 
+-         util_dynarray_foreach_reverse(&copies_array->arr, struct copy_entry, entry) {
++         util_dynarray_foreach_reverse(&copies_array->arr.entries, struct copy_entry, entry) {
+             if (nir_deref_mode_may_be(entry->dst.instr, written->modes))
+                copy_entry_remove(&copies_array->arr, entry, NULL);
+          }
+ 
+-         if (copies_array->arr.size == 0) {
++         if (copies_array->arr.entries.size == 0) {
+             _mesa_hash_table_remove(&copies->ht, ht_entry);
+          }
+       }
+ 
+-      util_dynarray_foreach_reverse(&copies->arr, struct copy_entry, entry) {
++      util_dynarray_foreach_reverse(&copies->arr.entries, struct copy_entry, entry) {
+          if (nir_deref_mode_may_be(entry->dst.instr, written->modes))
+             copy_entry_remove(&copies->arr, entry, NULL);
+       }
+@@ -1047,13 +1273,13 @@ dump_copy_entries(struct copies *copies)
+ {
+    hash_table_foreach(&copies->ht, ht_entry) {
+       struct util_dynarray *copies_array =
+-         &((struct copies_dynarray *)ht_entry->data)->arr;
++         &((struct copies_dynarray *)ht_entry->data)->arr.entries;
+ 
+       util_dynarray_foreach(copies_array, struct copy_entry, iter)
+          print_copy_entry(iter);
+    }
+ 
+-   util_dynarray_foreach(&copies->arr, struct copy_entry, iter)
++   util_dynarray_foreach(&copies->arr.entries, struct copy_entry, iter)
+       print_copy_entry(iter);
+ 
+    printf("\n");
+@@ -1470,8 +1696,9 @@ clone_copies(struct copy_prop_var_state *state, struct copies *clones,
+ 
+    _mesa_hash_table_clone_into(&clones->ht, &copies->ht);
+ 
+-   util_dynarray_clear(&clones->arr);
+-   util_dynarray_append_dynarray(&clones->arr, &copies->arr);
++   util_dynarray_clear(&clones->arr.entries);
++   util_dynarray_append_dynarray(&clones->arr.entries, &copies->arr.entries);
++   copy_index_invalidate(&clones->arr);
+ }
+ 
+ /* Returns an existing struct for reuse or creates a new on if they are
+@@ -1485,7 +1712,8 @@ get_copies_structure(struct copy_prop_var_state *state)
+    if (list_is_empty(&state->unused_copy_structs_list)) {
+       copies = ralloc(state->mem_ctx, struct copies);
+       copies->ht.table = NULL;
+-      util_dynarray_init(&copies->arr, state->mem_ctx);
++      util_dynarray_init(&copies->arr.entries, state->mem_ctx);
++      copies->arr.index = NULL;
+    } else {
+       copies = list_entry(state->unused_copy_structs_list.next,
+                           struct copies, node);

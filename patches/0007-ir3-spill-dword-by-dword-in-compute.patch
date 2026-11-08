@@ -1,0 +1,88 @@
+diff --git a/src/freedreno/ir3/ir3_lower_spill.c b/src/freedreno/ir3/ir3_lower_spill.c
+index e3f6b9a..cd375cb 100644
+--- a/src/freedreno/ir3/ir3_lower_spill.c
++++ b/src/freedreno/ir3/ir3_lower_spill.c
+@@ -94,14 +94,14 @@ handle_oob_offset_reload(struct ir3_instruction *reload)
+ }
+ 
+ static void
+-split_spill(struct ir3_instruction *spill)
++split_spill(struct ir3_instruction *spill, unsigned max_components)
+ {
+    unsigned orig_components = spill->srcs[2]->uim_val;
+ 
+    /* We don't handle splitting dependencies. */
+    assert(spill->deps_count == 0);
+ 
+-   if (orig_components <= 4) {
++   if (orig_components <= max_components) {
+       if (spill->srcs[1]->flags & IR3_REG_ARRAY) {
+          spill->srcs[1]->wrmask = MASK(orig_components);
+          spill->srcs[1]->num = spill->srcs[1]->array.base;
+@@ -110,8 +110,8 @@ split_spill(struct ir3_instruction *spill)
+       return;
+    }
+ 
+-   for (unsigned comp = 0; comp < orig_components; comp += 4) {
+-      unsigned components = MIN2(orig_components - comp, 4);
++   for (unsigned comp = 0; comp < orig_components; comp += max_components) {
++      unsigned components = MIN2(orig_components - comp, max_components);
+       struct ir3_instruction *clone = ir3_instr_clone(spill);
+       ir3_instr_move_before(clone, spill);
+ 
+@@ -131,13 +131,13 @@ split_spill(struct ir3_instruction *spill)
+ }
+ 
+ static void
+-split_reload(struct ir3_instruction *reload)
++split_reload(struct ir3_instruction *reload, unsigned max_components)
+ {
+    unsigned orig_components = reload->srcs[2]->uim_val;
+ 
+    assert(reload->deps_count == 0);
+ 
+-   if (orig_components <= 4) {
++   if (orig_components <= max_components) {
+       if (reload->dsts[0]->flags & IR3_REG_ARRAY) {
+          reload->dsts[0]->wrmask = MASK(orig_components);
+          reload->dsts[0]->num = reload->dsts[0]->array.base;
+@@ -146,8 +146,8 @@ split_reload(struct ir3_instruction *reload)
+       return;
+    }
+ 
+-   for (unsigned comp = 0; comp < orig_components; comp += 4) {
+-      unsigned components = MIN2(orig_components - comp, 4);
++   for (unsigned comp = 0; comp < orig_components; comp += max_components) {
++      unsigned components = MIN2(orig_components - comp, max_components);
+       struct ir3_instruction *clone = ir3_instr_clone(reload);
+       ir3_instr_move_before(clone, reload);
+ 
+@@ -198,14 +198,26 @@ add_spill_reload_deps(struct ir3_block *block)
+ bool
+ ir3_lower_spill(struct ir3 *ir)
+ {
++   /* Compute shaders on a6xx+ use the per-wave private memory layout, which
++    * interleaves the fibers of a wave dword by dword, unless some ldp/stp
++    * accesses more than one dword (ir3_collect_info, multi_dword_ldp_stp).
++    * A single vec2 spill would otherwise drop the whole shader to the
++    * per-fiber layout, where each lane of a spill or reload touches its own
++    * cache line, one fiber size apart. Spill one dword at a time instead.
++    */
++   unsigned max_components =
++      (ir->compiler->gen >= 6 &&
++       mesa_shader_stage_is_compute(ir->type))
++         ? 1 : 4;
++
+    foreach_block (block, &ir->block_list) {
+       foreach_instr_safe (instr, &block->instr_list) {
+          if (instr->opc == OPC_SPILL_MACRO) {
+             handle_oob_offset_spill(instr);
+-            split_spill(instr);
++            split_spill(instr, max_components);
+          } else if (instr->opc == OPC_RELOAD_MACRO) {
+             handle_oob_offset_reload(instr);
+-            split_reload(instr);
++            split_reload(instr, max_components);
+          }
+       }
+ 

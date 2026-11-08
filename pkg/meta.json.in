@@ -1,0 +1,1 @@
+{"schemaVersion":1,"name":"Anka Turnip @VERSION@","description":"Mesa Turnip (main, db6c407) with Anka Native's patches, for Adreno 8xx on KGSL","author":"EddizEge","packageVersion":"@VERSION@","vendor":"Mesa","driverVersion":"27.0.0-devel-db6c407","minApi":34,"libraryName":"@LIBRARY@"}

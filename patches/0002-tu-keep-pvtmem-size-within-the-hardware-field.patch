@@ -1,0 +1,49 @@
+diff --git a/src/freedreno/vulkan/tu_shader.cc b/src/freedreno/vulkan/tu_shader.cc
+index 103790a..a862bf8 100644
+--- a/src/freedreno/vulkan/tu_shader.cc
++++ b/src/freedreno/vulkan/tu_shader.cc
+@@ -3148,11 +3148,31 @@ tu_setup_pvtmem(struct tu_device *dev,
+    mtx_lock(&pvtmem_bo->mtx);
+ 
+    if (pvtmem_bo->per_fiber_size < pvtmem_bytes) {
++      /* More than SP_xS_PVT_MEM_PARAM.MEMSIZEPERITEM can describe (255 * 512
++       * bytes per fiber): any size programmed would wrap and the shader would
++       * read its spills from the wrong place. Fail instead of corrupting.
++       */
++      if (align(pvtmem_bytes, 512) > (0xffu << 9)) {
++         mesa_loge("shader needs %u bytes of private memory per fiber, more "
++                   "than the hardware can address (%u)", pvtmem_bytes,
++                   0xffu << 9);
++         mtx_unlock(&pvtmem_bo->mtx);
++         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++      }
+       if (pvtmem_bo->bo)
+          tu_bo_finish(dev, pvtmem_bo->bo);
+ 
+       pvtmem_bo->per_fiber_size =
+          util_next_power_of_two(align(pvtmem_bytes, 512));
++      /* SP_xS_PVT_MEM_PARAM.MEMSIZEPERITEM is 8 bits in 512-byte units: a
++       * power of two above 255 * 512 wraps to 0 there (128 KiB for a shader
++       * that needs 94 KiB), and every program set up with the shared BO from
++       * then on reads its spills as zeros. Keep the largest size the field
++       * holds when the shader's own need still fits in it.
++       */
++      const uint32_t max_per_fiber = 0xff << 9;
++      if (pvtmem_bo->per_fiber_size > max_per_fiber)
++         pvtmem_bo->per_fiber_size = max_per_fiber;
+       pvtmem_bo->per_sp_size =
+          align(pvtmem_bo->per_fiber_size *
+                   dev->physical_device->info->fibers_per_sp,
+@@ -3163,6 +3183,12 @@ tu_setup_pvtmem(struct tu_device *dev,
+       VkResult result = tu_bo_init_new(dev, NULL, &pvtmem_bo->bo, total_size,
+                                        TU_BO_ALLOC_INTERNAL_RESOURCE, "pvtmem");
+       if (result != VK_SUCCESS) {
++         /* The old BO is gone: forget it and its size, so the next program
++          * grows from nothing instead of taking a reference on a freed BO.
++          */
++         pvtmem_bo->bo = NULL;
++         pvtmem_bo->per_fiber_size = 0;
++         pvtmem_bo->per_sp_size = 0;
+          mtx_unlock(&pvtmem_bo->mtx);
+          return result;
+       }

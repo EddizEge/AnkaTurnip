@@ -1,0 +1,57 @@
+diff --git a/src/freedreno/vulkan/tu_pipeline.cc b/src/freedreno/vulkan/tu_pipeline.cc
+index 5b5dbab..de0a6ff 100644
+--- a/src/freedreno/vulkan/tu_pipeline.cc
++++ b/src/freedreno/vulkan/tu_pipeline.cc
+@@ -1970,6 +1970,7 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
+    if (!executable_info) {
+       cache_hit = true;
+       bool application_cache_hit = true;
++      bool stage_application_cache_hit[ARRAY_SIZE(nir)] = { false };
+ 
+       unsigned char shader_blake3[BLAKE3_KEY_LEN + 1];
+       memcpy(shader_blake3, pipeline_blake3, sizeof(pipeline_blake3));
+@@ -1984,10 +1985,18 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
+                                         sizeof(shader_blake3),
+                                         &shader_application_cache_hit);
+             if (!shaders[stage]) {
++               /* A miss: the shaders are compiled, so the pipeline did not
++                * come from the application's cache either. Breaking out
++                * before clearing this left the pipeline feedback reporting
++                * APPLICATION_PIPELINE_CACHE_HIT for a pipeline whose stages
++                * missed from the first one on.
++                */
+                cache_hit = false;
++               application_cache_hit = false;
+                break;
+             }
+             application_cache_hit &= shader_application_cache_hit;
++            stage_application_cache_hit[stage] = shader_application_cache_hit;
+          }
+       }
+ 
+@@ -2012,6 +2021,25 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
+          pipeline_feedback.flags |=
+             VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+       }
++
++      /* On a hit nothing is compiled, so tu_compile_shaders does not fill
++       * the stage feedback: report each stage that came from a cache, and
++       * whether it was the application's.
++       */
++      if (cache_hit) {
++         for (mesa_shader_stage stage = MESA_SHADER_VERTEX; stage < ARRAY_SIZE(nir);
++              stage = static_cast<mesa_shader_stage>(stage + 1)) {
++            if (!stage_infos[stage] && !nir[stage])
++               continue;
++            stage_feedbacks[stage].flags =
++               VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
++            if (stage_application_cache_hit[stage] &&
++                builder->cache != builder->device->mem_cache) {
++               stage_feedbacks[stage].flags |=
++                  VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
++            }
++         }
++      }
+    }
+ 
+    if (!cache_hit) {

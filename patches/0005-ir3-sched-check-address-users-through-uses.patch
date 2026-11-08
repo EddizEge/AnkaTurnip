@@ -1,0 +1,81 @@
+diff --git a/src/freedreno/ir3/ir3_sched.c b/src/freedreno/ir3/ir3_sched.c
+index 3f7bb6f..0b86d93 100644
+--- a/src/freedreno/ir3/ir3_sched.c
++++ b/src/freedreno/ir3/ir3_sched.c
+@@ -430,6 +430,32 @@ could_sched(struct ir3_sched_ctx *ctx,
+    return !should_skip(ctx, instr);
+ }
+ 
++/* For an instruction that writes a0.x/a1.x: false if it has indirect users
++ * (instructions whose address is this write) and none of them could be
++ * scheduled once it is.
++ *
++ * The indirect users are found through instr->uses (the address is an SSA
++ * source, so every user is in it, and split_addr() fills the uses of the
++ * clones it creates) rather than by scanning ir->a0_users/a1_users, which hold
++ * every indirect instruction of the shader: that scan made each check
++ * O(indirect instructions) and the scheduling of large blocks quadratic.
++ */
++static bool
++addr_users_could_sched(struct ir3_sched_ctx *ctx, struct ir3_instruction *instr)
++{
++   bool has_users = false;
++
++   foreach_ssa_use (indirect, instr) {
++      if (!indirect->address || indirect->address->def != instr->dsts[0])
++         continue;
++      has_users = true;
++      if (could_sched(ctx, indirect, instr))
++         return true;
++   }
++
++   return !has_users;
++}
++
+ /* Check if instruction is ok to schedule.  Make sure it is not blocked
+  * by use of addr/predicate register, etc.
+  */
+@@ -456,41 +482,8 @@ check_instr(struct ir3_sched_ctx *ctx, struct ir3_sched_notes *notes,
+     * NOTE if any instructions use pred register and have other
+     * src args, we would need to do the same for writes_pred()..
+     */
+-   if (writes_addr0(instr) && instr->uses) {
+-      struct ir3 *ir = instr->block->shader;
+-      bool ready = false;
+-      bool has_users = false;
+-      for (unsigned i = 0; (i < ir->a0_users_count) && !ready; i++) {
+-         struct ir3_instruction *indirect = ir->a0_users[i];
+-         if (!indirect)
+-            continue;
+-         if (indirect->address->def != instr->dsts[0])
+-            continue;
+-         has_users = true;
+-         ready = could_sched(ctx, indirect, instr);
+-      }
+-
+-      /* nothing could be scheduled, so keep looking: */
+-      if (has_users && !ready)
+-         return false;
+-   }
+-
+-   if (writes_addr1(instr) && instr->uses) {
+-      struct ir3 *ir = instr->block->shader;
+-      bool ready = false;
+-      bool has_users = false;
+-      for (unsigned i = 0; (i < ir->a1_users_count) && !ready; i++) {
+-         struct ir3_instruction *indirect = ir->a1_users[i];
+-         if (!indirect)
+-            continue;
+-         if (indirect->address->def != instr->dsts[0])
+-            continue;
+-         has_users = true;
+-         ready = could_sched(ctx, indirect, instr);
+-      }
+-
+-      /* nothing could be scheduled, so keep looking: */
+-      if (has_users && !ready)
++   if ((writes_addr0(instr) || writes_addr1(instr)) && instr->uses) {
++      if (!addr_users_could_sched(ctx, instr))
+          return false;
+    }
+ 
