@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EddizEge <300900304+EddizEge@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 05:55:38 +0300
+Subject: [PATCH] freedreno/common: Full sysmem depth CCU cache on Adreno 840
+ (guess)
+
+GUESS, NOT CONFIRMED: no Adreno 840 has run with this change yet.
+
+On three Adreno 840 phones Ocarina of Time loses the device at the first
+render pass over its 12288x12288 D16 (UBWC) depth target; the Adreno 830
+runs it. The only render-backend cache setting that differs between the
+two is the sysmem depth CCU cache: the 840 takes a8xx_gen2's
+THREE_QUARTER fraction with 192KB per CCU, the 830 a8xx_gen1's FULL
+with 256KB.
+
+Mesa MR 46016 (airidosas252, open draft) found that THREE_QUARTER
+deadlocks sysmem passes that write UBWC depth on the X2-90, another
+a8xx_gen2 GPU, and moves that GPU to FULL/256KB. This is the same change
+for both A840 entries (3 slice 0xffff44050A31, 2 slice 0xffff44050A21),
+re-done by hand against db6c407 (the MR's own commit touches only the
+X2-90 entry). The 840's GMEM mode already uses a FULL 256KB depth cache,
+and only the sysmem RB_CCU_CACHE_CNTL depth size and offset change: the
+depth cache moves down by num_ccu * 64KB from the top of GMEM. GMEM
+tiling, the 830 and every other GPU are unchanged.
+
+Runtime equivalent without this patch:
+FD_DEV_FEATURES=sysmem_ccu_depth_cache_fraction=0:sysmem_per_ccu_depth_cache_size=262144
+
+Idea from: https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/46016
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ src/freedreno/common/freedreno_devices.py | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+index 63abb5ccfbb..dc87e858d5b 100644
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -1563,7 +1563,12 @@ add_gpus([
+     ], A6xxGPUInfo(
+         CHIP.A8XX,
+         [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
+-         GPUProps(shading_rate_matches_vk = True)],
++         GPUProps(shading_rate_matches_vk = True,
++                  # Anka Turnip guess: the a8xx_gen2 THREE_QUARTER sysmem depth
++                  # cache may deadlock sysmem passes that write UBWC depth (Mesa
++                  # MR 46016 on X2-90). Use a830's full 256KB per CCU instead.
++                  sysmem_ccu_depth_cache_fraction = CCUColorCacheFraction.FULL.value,
++                  sysmem_per_ccu_depth_cache_size = 256 * 1024)],
+         num_ccu = 6,
+         num_slices = 3,
+         tile_align_w = 96,
+@@ -1583,7 +1588,10 @@ add_gpus([
+     ], A6xxGPUInfo(
+         CHIP.A8XX,
+         [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
+-         GPUProps(shading_rate_matches_vk = True)],
++         GPUProps(shading_rate_matches_vk = True,
++                  # Same guess as the 3 slice a840 above.
++                  sysmem_ccu_depth_cache_fraction = CCUColorCacheFraction.FULL.value,
++                  sysmem_per_ccu_depth_cache_size = 256 * 1024)],
+         num_ccu = 4,
+         num_slices = 2,
+         tile_align_w = 64,
