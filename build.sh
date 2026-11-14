@@ -10,9 +10,10 @@
 # Optional:
 #   MESA_SRC=<dir>  use this Mesa checkout instead of fetching one (at MESA_COMMIT, with no changes other than patches/)
 #   WORK=<dir>      where the source, the build and the zip go (default: ./work)
+#   VERSION=<v>     the version in meta.json and the zip name (default: 1.0.1), e.g. for a test build
 set -eu
 
-VERSION=1.0.0
+VERSION=${VERSION:-1.0.1}
 MESA_COMMIT=db6c407405a4353a1029704a344b565cf7f1fa48
 MESA_URL=https://gitlab.freedesktop.org/mesa/mesa.git
 LIBRARY=vulkan.anka_turnip.so
