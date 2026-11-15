@@ -25,15 +25,15 @@ for Qualcomm Adreno GPUs.
   Android NDK r28c, API level 34 or newer.
 - **Patches:** `patches/`, described below. All of them are general fixes; none is specific to a
   game.
-- **Tested on one phone:** a Xiaomi POCO F8 Pro (Snapdragon 8 Elite, Adreno 830, 12 GB,
-  Android 16), with the Ocarina of Time remake in Anka Native. On an Adreno 840 (POCO F8 Ultra)
-  the 1.0.1 test build lost the device, as 1.0.0 does there. Other phones, other Adreno GPUs and
-  other games were not tried with this build.
+- **Tested by us on one phone:** a Xiaomi POCO F8 Pro (Snapdragon 8 Elite, Adreno 830, 12 GB,
+  Android 16), with the Ocarina of Time remake in Anka Native. On an Adreno 840 (POCO F8 Ultra),
+  a user's test of the 1.0.1 test build lost the device, as 1.0.0 does there. Other phones,
+  other Adreno GPUs and other games were not tried with this build.
 
 ## What you need
 
-- An Android phone with a Snapdragon / Adreno 8xx GPU, Android 14 (API 34) or newer. Only an
-  Adreno 830 was tried; on an Adreno 840 Ocarina of Time still loses the device.
+- An Android phone with a Snapdragon / Adreno 8xx GPU, Android 14 (API 34) or newer. It ran on an
+  Adreno 830; on an Adreno 840 Ocarina of Time still loses the device.
 - **Anka Native**, or another app that installs custom Vulkan drivers in this zip layout.
 - Your own legally owned game dumps for the app. This driver contains no game content, keys or
   firmware.
@@ -53,9 +53,7 @@ own SHA-256 is `162efd0dc27ef9d369a0adae1b7d5e5cd1d10765ade46d3b886ab26fbde6599f
 
 In Anka Native:
 
-1. **Settings › GPU driver › Install… › Pick a zip…** and choose `AnkaTurnip-1.0.1.zip`. (Or
-   copy the zip to the app's `Android/data/<app>/files/gpu_drivers/` folder first; the
-   installer lists it there.)
+1. **Settings › GPU driver › Install… › Pick a zip…** and choose `AnkaTurnip-1.0.1.zip`.
 2. Pick **Anka Turnip 1.0.1** in the list. It is not picked for you. It is then the driver of
    every game that has no choice of its own. 1.0.0 can stay installed beside it.
 3. For one game only: the game's **⋯ › Game settings › GPU driver**.
