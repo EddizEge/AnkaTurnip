@@ -1,7 +1,9 @@
 # Anka Turnip
 
 **Anka Turnip — Mesa's Turnip Vulkan driver for Adreno 8xx phones, built for Anka Native.**
-This release is **Anka Turnip 1.0.0**: Mesa `main` at commit `db6c407` with seven small patches.
+This release is **Anka Turnip 1.0.1**: Mesa `main` at commit `db6c407` with nine small patches.
+It is 1.0.0 plus two fixes from newer Mesa (patches 0008 and 0009). It does **not** fix the
+Adreno 840 hang (Anka Native [#5](https://github.com/EddizEge/AnkaNative/issues/5)).
 
 Not affiliated with Mesa, freedreno, Qualcomm or Nintendo; please report problems in this
 repository's Issues, not to them. https://github.com/EddizEge/AnkaTurnip/issues
@@ -24,41 +26,43 @@ for Qualcomm Adreno GPUs.
 - **Patches:** `patches/`, described below. All of them are general fixes; none is specific to a
   game.
 - **Tested on one phone:** a Xiaomi POCO F8 Pro (Snapdragon 8 Elite, Adreno 830, 12 GB,
-  Android 16), with the Ocarina of Time remake in Anka Native. Other phones, other Adreno GPUs
-  and other games were not tried with this build.
+  Android 16), with the Ocarina of Time remake in Anka Native. On an Adreno 840 (POCO F8 Ultra)
+  the 1.0.1 test build lost the device, as 1.0.0 does there. Other phones, other Adreno GPUs and
+  other games were not tried with this build.
 
 ## What you need
 
 - An Android phone with a Snapdragon / Adreno 8xx GPU, Android 14 (API 34) or newer. Only an
-  Adreno 830 was tried.
+  Adreno 830 was tried; on an Adreno 840 Ocarina of Time still loses the device.
 - **Anka Native**, or another app that installs custom Vulkan drivers in this zip layout.
 - Your own legally owned game dumps for the app. This driver contains no game content, keys or
   firmware.
 
 ## Download and check
 
-The release has `AnkaTurnip-1.0.0.zip` and `SHA256SUMS.txt`. Do not unpack the zip: the app
+The release has `AnkaTurnip-1.0.1.zip` and `SHA256SUMS.txt`. Do not unpack the zip: the app
 installs it as it is. To check a download on a PC: `sha256sum -c SHA256SUMS.txt --ignore-missing`
-(Linux, macOS, Git Bash), or `certutil -hashfile AnkaTurnip-1.0.0.zip SHA256` in a Windows
+(Linux, macOS, Git Bash), or `certutil -hashfile AnkaTurnip-1.0.1.zip SHA256` in a Windows
 command prompt and compare with the file.
 
 The zip holds `meta.json`, `vulkan.anka_turnip.so`, `LICENSE.txt` and `NOTICE.md`. The library's
-own SHA-256 is `178d66ffe240b527aa0689db5940a9977374764974eebf69a88db9e0a186dc4b`.
+own SHA-256 is `162efd0dc27ef9d369a0adae1b7d5e5cd1d10765ade46d3b886ab26fbde6599f` (1.0.0's was
+`178d66ffe240b527aa0689db5940a9977374764974eebf69a88db9e0a186dc4b`).
 
 ## Install
 
 In Anka Native:
 
-1. **Settings › GPU driver › Install… › Pick a zip…** and choose `AnkaTurnip-1.0.0.zip`. (Or
+1. **Settings › GPU driver › Install… › Pick a zip…** and choose `AnkaTurnip-1.0.1.zip`. (Or
    copy the zip to the app's `Android/data/<app>/files/gpu_drivers/` folder first; the
    installer lists it there.)
-2. Pick **Anka Turnip 1.0.0** in the list. It is then the driver of every game that has no
-   choice of its own.
+2. Pick **Anka Turnip 1.0.1** in the list. It is not picked for you. It is then the driver of
+   every game that has no choice of its own. 1.0.0 can stay installed beside it.
 3. For one game only: the game's **⋯ › Game settings › GPU driver**.
 4. The choice takes effect the next time a game starts. **System** goes back to the phone's own
    driver.
 
-The app unpacks the zip into its private files (`files/gpu_drivers/Anka_Turnip_1.0.0/`). A zip
+The app unpacks the zip into its private files (`files/gpu_drivers/Anka_Turnip_1.0.1/`). A zip
 with the same name in `meta.json` replaces the installed copy.
 
 ## The patches
@@ -74,6 +78,8 @@ Applied in this order to `db6c407`. Each file is one topic.
 | `0005-ir3-sched-check-address-users-through-uses` | The ir3 scheduler finds the users of an address register write through its uses. | It scanned every indirect instruction of the shader for each check, which made scheduling large blocks quadratic (`check_instr`). |
 | `0006-tu-pipeline-creation-feedback-on-cache-hits` | Pipeline creation feedback is right on cache misses and filled per stage on hits. | A fully compiled pipeline reported `APPLICATION_PIPELINE_CACHE_HIT`, so the app could not tell new compiles from cache hits. |
 | `0007-ir3-spill-dword-by-dword-in-compute` | On a6xx and newer, compute shaders spill and reload one dword at a time. | A single multi-dword spill dropped the whole shader from the per-wave private-memory layout to the slower per-fiber one. |
+| `0008-tu-clear-unused-sp-xs-bases` | Since 1.0.1. On Adreno 8xx the base registers of unused shader stages are written, also in the 3D blit and clear path. Mesa commit `78fd465cef84`, cherry-picked. | Without a write the hardware keeps the old base address of an unused stage and can fetch from it. |
+| `0009-tu-wfi-before-reading-registers-that-were-just-written` | Since 1.0.1. A wait for idle before register reads in the GMEM 3D store blit and transform feedback (every GPU) and in unaligned indirect dispatch on Adreno 8xx. Mesa commit `1c87c6018706`, cherry-picked. | Those register reads do not wait for idle, so they could return the value from before a write. |
 
 ## Measured results
 
@@ -90,13 +96,26 @@ Applied in this order to `db6c407`. Each file is one topic.
 - **Spills in compute (patch 0007), PC:** in two large compute shaders, multi-dword spill
   instructions went from 52 and 36 to 0, and Turnip no longer warns that it falls back to the
   per-fiber layout. Not timed on the phone by itself.
-- **In use:** this exact library (SHA-256 above) was the driver of the Ocarina of Time runs that
+- **In use:** 1.0.0's library (`178d66ff…`) was the driver of the Ocarina of Time runs that
   reached Kokiri Forest on the POCO F8 Pro (7-8 November 2026).
+- **1.0.1 against 1.0.0 (patches 0008 and 0009), phone:** on the POCO F8 Pro (Adreno 830) only,
+  with Ocarina of Time, Deku Tree upper floor, 3-minute runs from a cool start, on an earlier
+  Anka Native build of the 0.3.0 line: fps 23.4 / 21.9 with 1.0.1, against 23.7 / 21.1 with
+  1.0.0; GPU time 32.7-35.5 ms a frame for both. The picture was the same; no device loss. Peak
+  memory of the game was higher: 3.51 GB, against 3.27-3.38 GB with 1.0.0. Not run with the
+  final Anka Native 0.3.0 build.
 
 ## Known issues
 
 - **One phone, one game.** Only the Adreno 830 in a POCO F8 Pro and only the Ocarina of Time
   remake were tried. Donkey Kong Bananza and Mario Kart World were not run with this build.
+- **Adreno 840: the device is lost.** 1.0.1 does not fix the hang of Anka Native
+  [#5](https://github.com/EddizEge/AnkaNative/issues/5): on a POCO F8 Ultra the device was still
+  lost at the first gameplay frames, the same way as with 1.0.0. The extra Adreno 840 change of
+  the 1.0.1 test build (`AnkaTurnip-1.0.1-a840ccu.zip`) did not help either and is not in this
+  release.
+- **Higher peak memory with 1.0.1** on the Adreno 830 (3.51 GB against 3.27-3.38 GB with
+  1.0.0). We have not shown whether this is noise.
 - **Patches 0002 and 0006 were not checked on the phone by themselves.** 0002 makes a shader
   that needs more than 127.5 KiB of private memory a fiber fail to compile
   (`VK_ERROR_OUT_OF_DEVICE_MEMORY`) instead of breaking the shaders made after it.
@@ -121,11 +140,14 @@ ANDROID_NDK_HOME=/path/to/android-ndk ./build.sh
 `build.sh` fetches Mesa at `db6c407` (or uses `MESA_SRC=<a clean checkout at that commit>`),
 applies `patches/` in order, writes a cross file for the NDK, configures with the options of the
 release build, builds `libvulkan_freedreno.so` (in `<mesa>/build-android`), strips it and packs
-`work/AnkaTurnip-1.0.0.zip`. The meson options are in the script. To apply the patches by hand:
+`work/AnkaTurnip-1.0.1.zip`. The meson options are in the script. To apply the patches by hand:
 `git -C <mesa> apply patches/*.patch`.
 
 The build is reproducible: on Linux with NDK r28c (28.2.13676358) and meson 1.12.1, `build.sh`
-gave a library byte-identical to the released one (SHA-256 `178d66ff…`). The build folder must
+gave a library byte-identical to the released 1.0.0 one (SHA-256 `178d66ff…`). The 1.0.1
+library (`162efd0d…`) was built once by `build.sh` from this tree, with the same NDK and meson;
+it was not built a second time to compare. The zip itself stores file times, so a rebuilt zip
+has another SHA-256 even when its library is the same. The build folder must
 stay inside the Mesa tree, as the script puts it: the library keeps source paths relative to it
 in its messages, so another folder gives different bytes.
 
